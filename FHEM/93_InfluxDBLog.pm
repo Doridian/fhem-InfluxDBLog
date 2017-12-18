@@ -7,6 +7,43 @@ use warnings;
 use LWP::UserAgent;
 use Time::Piece;
 
+sub
+InfluxDBLog_LoadMetricMaps($@)
+{
+    my ( $def, $attrValue ) = @_;
+
+    my $PREFIX = "MMAP_";
+
+    my @arr = split("\n", $attrValue);
+    my %dict;
+    my $val;
+    foreach $val (@arr) {
+      my @a = split("=", $val);
+      next  if (int(@a) != 2);
+      my $name = $PREFIX . $a[0];
+      $def->{$name} = $a[1];
+      $dict{$name} = 1;
+    }
+
+    my $key;
+    foreach $key (keys %{$def})
+    {
+      next if ($key !~ m/^$PREFIX/ || $dict{$key});
+      #my $value = $def->{$key};
+      delete $def->{$key};
+      #print($key . "remove ");
+    }
+
+    $def->{MAPS_LOADED} = 1;
+}
+
+sub
+InfluxDBLog_LoadMetricMapsDef($@)
+{
+  my ( $def ) = @_;
+  InfluxDBLog_LoadMetricMaps($def, AttrVal($def->{NAME}, "metricMapping", ""));
+}
+
 #####################################
 sub
 InfluxDBLog_Initialize($)
@@ -16,15 +53,9 @@ InfluxDBLog_Initialize($)
   $hash->{DefFn}    = "InfluxDBLog_Define";
   $hash->{NotifyFn} = "InfluxDBLog_Log";
   $hash->{AttrFn}   = "InfluxDBLog_Attr";
+  $hash->{AttrList} = "addStateEvent:1,0 disable:1,0 disabledForIntervals metricMapping:textField-long";
 
-  no warnings 'qw';
-  my @attrList = qw(
-      addStateEvent:1,0
-          disable:1,0
-          disabledForIntervals
-      );
-  use warnings 'qw';
-  $hash->{AttrList} = join(" ", @attrList);
+  addToAttrList("influxIgnore:0,1");
 }
 
 
@@ -40,7 +71,7 @@ InfluxDBLog_Define($@)
       if(int(@a) != 8);
 
   return "Bad regexp: starting with *" if($a[5] =~ m/^\*/);
-  eval { "Hallo" =~ m/^$a[5]$/ };
+  eval { "Hallo" =~ m/^$a[7]$/ };
   return "Bad regexp: $@" if($@);
 
   $hash->{FH} = $fh;
@@ -53,6 +84,9 @@ InfluxDBLog_Define($@)
   $hash->{STATE} = "active";
   readingsSingleUpdate($hash, "filecount", 0, 0);
   notifyRegexpChanged($hash, $a[7]);
+
+  #InfluxDBLog_LoadMetricMapsDef($hash);
+
   Log3 $hash->{NAME}, 4, "$hash->{NAME}: Initialized";
 
   return undef;
@@ -105,13 +139,29 @@ InfluxDBLog_Write($)
   my ($ptr) = @_;
   my ($log, $dev, $EVENT) = ($ptr->{log}, $ptr->{dev}, $ptr->{evt});
   my $NAME = $dev->{NAME};
+  my $TYPE = $dev->{TYPE};
+
+  return if(!$log->{MAPS_LOADED});
+
+  my $IGNORE = AttrVal($dev->{NAME}, "influxIgnore", 0);
+  return if($IGNORE);
 
   my $ln = $log->{NAME};
 
   my @arr = split(": ", $EVENT);
   return if (int(@arr) != 2);
 
-  my $data = "$arr[0],site_name=$NAME value=$arr[1]";
+  my $filteredMetricName = $log->{"MMAP_" . $arr[0]};
+  return if(!$filteredMetricName);
+
+  my $value = $arr[1];
+  return if($value =~ m/[^.\d]/);
+
+  if ($value !~ m/\./) {
+    $value .= ".0";
+  }
+
+  my $data = "$filteredMetricName,deviceName=$NAME,deviceType=$TYPE,rawMetricName=$arr[0] value=$value";
 
   Log3 $ln, 4, "$ln: Writing $data";
 
@@ -128,7 +178,9 @@ InfluxDBLog_Write($)
   $lwp_user_agent->agent("FHEMInfluxDB-HTTP/0.01");
   my $response = $lwp_user_agent->post($uri->canonical(), Content => $data);
 
-  if ($response->code() != 204) {
+  my $code = $response->code();
+
+  if ($code < 200 || $code > 299) {
     my $error = $response->message();
     my $errorcode = $response->code();
     Log3 $ln, 4, "$ln: Error $errorcode $error";
@@ -142,16 +194,19 @@ InfluxDBLog_Write($)
 sub
 InfluxDBLog_Attr(@)
 {
-  my @a = @_;
-  my $do = 0;
+  my ( $cmd, $name, $attrName, $attrValue ) = @_;
 
-  if($a[0] eq "set" && $a[2] eq "disable") {
-    $do = (!defined($a[3]) || $a[3]) ? 1 : 2;
+  if ( $cmd eq "del" ) {
+    $attrValue = "";
+  } elsif ( $cmd ne "set" ) {
+    return undef;
   }
-  $do = 2 if($a[0] eq "del" && (!$a[2] || $a[2] eq "disable"));
-  return if(!$do);
 
-  $defs{$a[1]}{STATE} = ($do == 1 ? "disabled" : "active");
+  if ( $attrName eq "metricMapping" ) {
+    InfluxDBLog_LoadMetricMaps($defs{$name}, $attrValue);
+  } elsif ( $attrName eq "disable" ) {
+    $defs{$name}{STATE} = ($attrValue ? "disabled" : "active");
+  }
 
   return undef;
 }
