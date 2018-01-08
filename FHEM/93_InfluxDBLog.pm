@@ -155,7 +155,7 @@ InfluxDBLog_Write($)
   return if(!$filteredMetricName);
 
   my $value = $arr[1];
-  return if($value =~ m/[^.\d]/);
+  return if($value =~ m/[^.\-\d]/);
 
   if ($value !~ m/\./) {
     $value .= ".0";
